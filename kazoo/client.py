@@ -14,6 +14,7 @@ from kazoo.exceptions import NoNodeException
 from kazoo.exceptions import err_to_exception
 from kazoo.handlers.threading import SequentialThreadingHandler
 from kazoo.recipe.lock import Lock
+from kazoo.recipe.semaphore import Semaphore
 from kazoo.recipe.party import Party
 from kazoo.recipe.party import ShallowParty
 from kazoo.recipe.election import Election
@@ -405,6 +406,7 @@ class KazooClient(object):
         self.DataWatch = partial(DataWatch, self)
         self.Election = partial(Election, self)
         self.Lock = partial(Lock, self)
+        self.Semaphore = partial(Semaphore, self)
         self.Party = partial(Party, self)
         self.SetPartitioner = partial(SetPartitioner, self)
         self.ShallowParty = partial(ShallowParty, self)
