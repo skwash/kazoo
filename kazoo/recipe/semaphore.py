@@ -45,10 +45,15 @@ class Semaphore(object):
         self.wake_event.set()
 
     def acquire(self):
-        pass
-
-    def release(self):
-        pass
+        """Acquire the mutex, blocking until it is obtained"""
+        try:
+            self.client.retry(self._inner_acquire)
+            self.is_acquired = True
+        except Exception:
+            # if we did ultimately fail, attempt to clean up
+            self._best_effort_cleanup()
+            self.cancelled = False
+            raise
 
     def _inner_acquire(self):
         self.wake_event.clear()
