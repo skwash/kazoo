@@ -95,9 +95,16 @@ class Semaphore(object):
             if our_index < self.maxLocks:
                 return True
 
-            # otherwise we are in the mix. watch predecessor and bide our time
-            predecessor = self.path + "/" + children[our_index - 1]
-            if self.client.exists(predecessor, self._watch_predecessor):
+            # Watch num_locks preceding children.
+            exists=True
+            for child in children[max(our_index-self.maxLocks, 0):our_index]:
+                if child == node:
+                    break
+
+                if not self.client.exists(self.path + "/" + child, self._watch_predecessor):
+                    exists = False
+            # this could probably be done better.
+            if exists:
                 self.wake_event.wait()
 
     def _watch_predecessor(self, event):
@@ -169,4 +176,5 @@ class Semaphore(object):
         self.acquire()
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.release()    
+        self.release()
+
