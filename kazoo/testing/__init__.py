@@ -3,15 +3,20 @@ import atexit
 import logging
 import os
 import uuid
+import sys
 from collections import namedtuple
+import threading
 import unittest
 
 import zookeeper
 from kazoo.client import Callback
 from kazoo.client import KazooClient
+from kazoo.client import KazooState
 from kazoo.testing.common import ZookeeperCluster
 
 log = logging.getLogger(__name__)
+
+zookeeper.deterministic_conn_order(True)
 
 CLUSTER = None
 
@@ -226,9 +231,20 @@ class KazooTestHarness(object):
 
         """
         client_id = client_id or self.client.client_id
-        client = KazooClient(self.cluster[1].address, client_id=client_id)
+
+        lost = threading.Event()
+
+        def watch_loss(state):
+            if state == KazooState.LOST:
+                lost.set()
+                return True
+
+        self.client.add_listener(watch_loss)
+
+        client = KazooClient(self.cluster[1].address, client_id=client_id, timeout=0.8)
         client.start()
         client.stop()
+        lost.wait(0.5)
 
     def setup_zookeeper(self):
         """Create a ZK cluster and chrooted :class:`KazooClient`
@@ -236,7 +252,6 @@ class KazooTestHarness(object):
         The cluster will only be created on the first invocation and won't be
         fully torn down until exit.
         """
-        zookeeper.deterministic_conn_order(True)
         if not self.cluster[0].running:
             self.cluster.start()
         namespace = "/kazootests" + uuid.uuid4().hex
