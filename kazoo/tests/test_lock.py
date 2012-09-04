@@ -1,12 +1,10 @@
 import uuid
 import threading
 
-import zookeeper
 from nose.tools import eq_
 
 from kazoo.exceptions import CancelledError
 from kazoo.testing import KazooTestCase
-from kazoo.testing import ZooError
 from kazoo.tests.util import wait
 
 
@@ -120,12 +118,6 @@ class KazooLockTests(KazooTestCase):
             thread.join()
 
     def test_lock_fail_first_call(self):
-        self.add_errors(dict(
-            acreate=[True,  # This is our lock node create
-                     ZooError('completion', zookeeper.CONNECTIONLOSS, True)
-                    ]
-        ))
-
         event1 = threading.Event()
         lock1 = self.client.Lock(self.lockpath, "one")
         thread1 = threading.Thread(target=self._thread_lock_acquire_til_event,
@@ -178,3 +170,10 @@ class KazooLockTests(KazooTestCase):
         event1.set()
         thread1.join()
         client2.stop()
+
+    def test_lock_double_calls(self):
+        lock1 = self.client.Lock(self.lockpath, "one")
+        lock1.acquire()
+        lock1.acquire()
+        lock1.release()
+        lock1.release()

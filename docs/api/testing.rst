@@ -1,14 +1,12 @@
-.. _testing_module:
+.. _testing_harness_module:
 
-:mod:`kazoo.testing`
+:mod:`kazoo.testing.harness`
 ----------------------------
 
-.. automodule:: kazoo.testing
+.. automodule:: kazoo.testing.harness
 
 Public API
 ++++++++++
 
     .. autoclass:: KazooTestHarness
     .. autoclass:: KazooTestCase
-    .. autoclass:: ZookeeperErrors
-    .. autoclass:: ZooError

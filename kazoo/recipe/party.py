@@ -5,7 +5,7 @@ used for determining members of a party.
 """
 import uuid
 
-from kazoo.exceptions import NodeExistsException, NoNodeException
+from kazoo.exceptions import NodeExistsError, NoNodeError
 
 
 class BaseParty(object):
@@ -40,19 +40,20 @@ class BaseParty(object):
         try:
             self.client.create(self.create_path, self.data, ephemeral=True)
             self.participating = True
-        except NodeExistsException:
+        except NodeExistsError:
             # node was already created, perhaps we are recovering from a
             # suspended connection
             self.participating = True
 
     def leave(self):
         """Leave the party"""
+        self.participating = False
         return self.client.retry(self._inner_leave)
 
     def _inner_leave(self):
         try:
             self.client.delete(self.create_path)
-        except NoNodeException:
+        except NoNodeError:
             return False
         return True
 
@@ -83,7 +84,7 @@ class Party(BaseParty):
                 d, _ = self.client.retry(self.client.get, self.path +
                                          "/" + child)
                 yield d
-            except NoNodeException:
+            except NoNodeError:  # pragma: nocover
                 pass
 
     def _get_children(self):

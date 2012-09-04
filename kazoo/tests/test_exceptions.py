@@ -1,31 +1,22 @@
-import unittest
-
-from nose.tools import eq_
-import zookeeper
+from unittest import TestCase
 
 
-class TestExceptions(unittest.TestCase):
-    def _makeOne(self, *args, **kwargs):
-        from kazoo.exceptions import err_to_exception
-        return err_to_exception(*args, **kwargs)
+class ExceptionsTestCase(TestCase):
 
-    def test_error_translate(self):
-        exc = self._makeOne(zookeeper.SYSTEMERROR)
-        assert isinstance(exc, zookeeper.SystemErrorException)
+    def _get(self):
+        from kazoo import exceptions
+        return exceptions
 
-    def test_error_with_message(self):
-        exc = self._makeOne(zookeeper.NONODE, msg="oops")
-        assert isinstance(exc, zookeeper.NoNodeException)
-        eq_(str(exc), "no node: oops")
+    def test_backwards_alias(self):
+        module = self._get()
+        self.assertTrue(getattr(module, 'NoNodeException'))
+        self.assertTrue(module.NoNodeException, module.NoNodeError)
 
-    def test_generic_error_code(self):
-        exc = self._makeOne(-200)
-        assert isinstance(exc, Exception)
+    def test_exceptions_code(self):
+        module = self._get()
+        exc_8 = module.EXCEPTIONS[-8]
+        self.assertTrue(isinstance(exc_8(), module.BadArgumentsError))
 
-    def test_zookeeper_ok(self):
-        exc = self._makeOne(zookeeper.OK)
-        eq_(exc, None)
-
-    def test_not_error_code(self):
-        exc = self._makeOne("this needs to be an int")
-        assert isinstance(exc, Exception)
+    def test_invalid_code(self):
+        module = self._get()
+        self.assertRaises(RuntimeError, module.EXCEPTIONS.__getitem__, 666)

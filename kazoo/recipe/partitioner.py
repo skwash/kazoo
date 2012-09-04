@@ -17,7 +17,6 @@ Example Use-Case
 import logging
 import os
 import socket
-import threading
 from functools import partial
 
 from kazoo.client import KazooState
@@ -243,7 +242,7 @@ class SetPartitioner(object):
 
         """
         self._release_locks()
-        if self._locks:
+        if self._locks:  # pragma: nocover
             # This shouldn't happen, it means we couldn't release our
             # locks, abort
             self._fail_out()
@@ -266,13 +265,13 @@ class SetPartitioner(object):
         if self._party.participating:
             try:
                 self._party.leave()
-            except Exception:
+            except Exception:  # pragma: nocover
                 pass
 
     def _allocate_transition(self, result):
         """Called when in allocating mode, and the children settled"""
         # Did we get an exception waiting for children to settle?
-        if result.exception:
+        if result.exception:  # pragma: nocover
             self._fail_out()
             return
 
@@ -303,14 +302,14 @@ class SetPartitioner(object):
                                      str(member))
             try:
                 lock.acquire()
-            except Exception:
+            except Exception:  # pragma: nocover
                 return self.finish()
             self._locks.append(lock)
 
         # All locks acquired! Time for state transition, make sure
         # we didn't inadvertently get lost thus far
         with self._state_change:
-            if self.failed:
+            if self.failed:  # pragma: nocover
                 return self.finish()
             self.state = PartitionState.ACQUIRED
             self._acquire_event.set()
@@ -321,7 +320,7 @@ class SetPartitioner(object):
         for lock in self._locks[:]:
             try:
                 lock.release()
-            except Exception:
+            except Exception:  # pragma: nocover
                 # We proceed to remove as many as possible, and leave
                 # the ones we couldn't remove
                 pass
@@ -348,7 +347,7 @@ class SetPartitioner(object):
 
         """
         watcher = PatientChildrenWatch(self._client, self._party_path,
-                                         self._time_boundary)
+                                       self._time_boundary)
         asy = watcher.start()
         if func:
             # We spin up the function in a separate thread/greenlet
@@ -363,8 +362,8 @@ class SetPartitioner(object):
         """Register ourself to listen for session events, we shut down
         if we become lost"""
         if state == KazooState.LOST:
-            self._client.remove_listener(self._establish_sessionwatch)
             self._fail_out()
+            return True
 
     def _partitioner(self, identifier, members, partitions):
         # Ensure consistent order of partitions/members
