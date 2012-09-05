@@ -5,7 +5,6 @@ from nose.tools import eq_
 
 from kazoo.exceptions import CancelledError
 from kazoo.testing import KazooTestCase
-from kazoo.testing import ZooError
 from kazoo.tests.util import wait
 import time
 
