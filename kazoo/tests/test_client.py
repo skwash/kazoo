@@ -2,6 +2,7 @@ import threading
 import uuid
 import unittest
 
+from nose import SkipTest
 from nose.tools import eq_
 from nose.tools import raises
 
@@ -12,6 +13,33 @@ from kazoo.exceptions import InvalidACLError
 from kazoo.exceptions import NoNodeError
 from kazoo.exceptions import NoAuthError
 from kazoo.exceptions import ConnectionLoss
+
+
+class TestClientTransitions(KazooTestCase):
+    def test_connection_and_disconnection(self):
+        from kazoo.client import KazooState
+        states = []
+        rc = threading.Event()
+
+        @self.client.add_listener
+        def listener(state):
+            states.append(state)
+            if state == KazooState.CONNECTED:
+                rc.set()
+
+        self.client.stop()
+        eq_(states, [KazooState.LOST])
+        states.pop()
+
+        self.client.start()
+        rc.wait(2)
+        eq_(states, [KazooState.CONNECTED])
+        rc.clear()
+        states.pop()
+        self.expire_session()
+        rc.wait(2)
+        eq_(states, [KazooState.SUSPENDED, KazooState.LOST,
+                     KazooState.CONNECTED])
 
 
 class TestClientConstructor(unittest.TestCase):
@@ -258,6 +286,23 @@ class TestClient(KazooTestCase):
         mb_2 = "a" * (2 * 1024 * 1024)
         self.assertRaises(ConnectionLoss, client.create, "/2", mb_2)
 
+    def test_create_acl_duplicate(self):
+        from kazoo.security import OPEN_ACL_UNSAFE
+        single_acl = OPEN_ACL_UNSAFE[0]
+        client = self.client
+        client.create("/1", acl=[single_acl, single_acl])
+        acls, stat = client.get_acls("/1")
+        # ZK >3.4 removes duplicate ACL entries
+        version = client.server_version()
+        self.assertEqual(len(acls), 1 if version > (3, 4) else 2)
+
+    def test_version_no_connection(self):
+        @raises(ConnectionLoss)
+        def testit():
+            self.client.server_version()
+        self.client.stop()
+        testit()
+
     def test_create_ephemeral(self):
         client = self.client
         client.create("/1", "ephemeral", ephemeral=True)
@@ -458,6 +503,11 @@ class TestClient(KazooTestCase):
         client.create('/a')
         self.assertRaises(InvalidACLError, client.set_acls, '/a', [])
 
+    def test_set_acls_no_node(self):
+        from kazoo.security import OPEN_ACL_UNSAFE
+        client = self.client
+        self.assertRaises(NoNodeError, client.set_acls, '/a', OPEN_ACL_UNSAFE)
+
     def test_set_acls_invalid_arguments(self):
         from kazoo.security import OPEN_ACL_UNSAFE
         single_acl = OPEN_ACL_UNSAFE[0]
@@ -470,8 +520,10 @@ class TestClient(KazooTestCase):
     def test_set(self):
         client = self.client
         client.create('a', 'first')
-        client.set('a', 'second')
-        self.assertEqual(client.get('a')[0], 'second')
+        stat = client.set('a', 'second')
+        data, stat2 = client.get('a')
+        self.assertEqual(data, 'second')
+        self.assertEqual(stat, stat2)
 
     def test_set_invalid_arguments(self):
         client = self.client
@@ -510,9 +562,29 @@ class TestClient(KazooTestCase):
         self.assertEqual(set(client.get_children('/a/b')), set(['c', 'd']))
         self.assertEqual(client.get_children('/a/b/c'), [])
 
+    def test_get_children2(self):
+        client = self.client
+        client.ensure_path('/a/b')
+        children, stat = client.get_children('/a', include_data=True)
+        value, stat2 = client.get('/a')
+        self.assertEqual(children, ['b'])
+        self.assertEqual(stat2.version, stat.version)
+
+    def test_get_children2_many_nodes(self):
+        client = self.client
+        client.ensure_path('/a/b')
+        client.ensure_path('/a/c')
+        client.ensure_path('/a/d')
+        children, stat = client.get_children('/a', include_data=True)
+        value, stat2 = client.get('/a')
+        self.assertEqual(set(children), set(['b', 'c', 'd']))
+        self.assertEqual(stat2.version, stat.version)
+
     def test_get_children_no_node(self):
         client = self.client
         self.assertRaises(NoNodeError, client.get_children, '/none')
+        self.assertRaises(NoNodeError, client.get_children,
+            '/none', include_data=True)
 
     def test_get_children_invalid_path(self):
         client = self.client
@@ -522,6 +594,8 @@ class TestClient(KazooTestCase):
         client = self.client
         self.assertRaises(TypeError, client.get_children, ('a', 'b'))
         self.assertRaises(TypeError, client.get_children, 'a', watch=True)
+        self.assertRaises(TypeError, client.get_children,
+            'a', include_data='yes')
 
     def test_invalid_auth(self):
         from kazoo.exceptions import AuthFailedError
@@ -544,11 +618,152 @@ class TestClient(KazooTestCase):
             client._safe_close()
         testit()
 
+    def test_client_state(self):
+        from kazoo.protocol.states import KeeperState
+        eq_(self.client.client_state, KeeperState.CONNECTED)
+
+
 dummy_dict = {
     'aversion': 1, 'ctime': 0, 'cversion': 1,
     'czxid': 110, 'dataLength': 1, 'ephemeralOwner': 'ben',
     'mtime': 1, 'mzxid': 1, 'numChildren': 0, 'pzxid': 1, 'version': 1
 }
+
+
+class TestClientTransactions(KazooTestCase):
+    def setUp(self):
+        KazooTestCase.setUp(self)
+        ver = self.client.server_version()
+        if ver[1] < 4:
+            raise SkipTest("Must use zookeeper 3.4 or above")
+
+    def test_basic_create(self):
+        t = self.client.transaction()
+        t.create('/freddy')
+        t.create('/fred', ephemeral=True)
+        t.create('/smith', sequence=True)
+        results = t.commit()
+        eq_(results[0], '/freddy')
+        eq_(len(results), 3)
+        self.assertTrue(results[2].startswith('/smith0'))
+
+    def test_bad_creates(self):
+        args_list = [(True,), ('/smith', 0), ('/smith', '', 'bleh'),
+                     ('/smith', '', None, 'fred'),
+                     ('/smith', '', None, True, 'fred')]
+
+        @raises(TypeError)
+        def testit(args):
+            t = self.client.transaction()
+            t.create(*args)
+
+        for args in args_list:
+            testit(args)
+
+    def test_default_acl(self):
+        from kazoo.security import make_digest_acl
+        username = uuid.uuid4().hex
+        password = uuid.uuid4().hex
+
+        digest_auth = "%s:%s" % (username, password)
+        acl = make_digest_acl(username, password, all=True)
+
+        self.client.add_auth("digest", digest_auth)
+        self.client.default_acl = (acl,)
+
+        t = self.client.transaction()
+        t.create('/freddy')
+        results = t.commit()
+        eq_(results[0], '/freddy')
+
+    def test_basic_delete(self):
+        self.client.create('/fred')
+        t = self.client.transaction()
+        t.delete('/fred')
+        results = t.commit()
+        eq_(results[0], True)
+
+    def test_bad_deletes(self):
+        args_list = [(True,), ('/smith', 'woops'), ]
+
+        @raises(TypeError)
+        def testit(args):
+            t = self.client.transaction()
+            t.delete(*args)
+
+        for args in args_list:
+            testit(args)
+
+    def test_set(self):
+        self.client.create('/fred', '01')
+        t = self.client.transaction()
+        t.set_data('/fred', 'oops')
+        t.commit()
+        res = self.client.get('/fred')
+        eq_(res[0], 'oops')
+
+    def test_bad_sets(self):
+        args_list = [(42, 52), ('/smith', False), ('/smith', '', 'oops')]
+
+        @raises(TypeError)
+        def testit(args):
+            t = self.client.transaction()
+            t.set_data(*args)
+
+        for args in args_list:
+            testit(args)
+
+    def test_check(self):
+        self.client.create('/fred')
+        version = self.client.get('/fred')[1].version
+        t = self.client.transaction()
+        t.check('/fred', version)
+        t.create('/blah')
+        results = t.commit()
+        eq_(results[0], True)
+        eq_(results[1], '/blah')
+
+    def test_bad_checks(self):
+        args_list = [(42, 52), ('/smith', 'oops')]
+
+        @raises(TypeError)
+        def testit(args):
+            t = self.client.transaction()
+            t.check(*args)
+
+        for args in args_list:
+            testit(args)
+
+    def test_bad_transaction(self):
+        from kazoo.exceptions import RolledBackError, NoNodeError
+        t = self.client.transaction()
+        t.create('/fred')
+        t.delete('/smith')
+        results = t.commit()
+        eq_(results[0].__class__, RolledBackError)
+        eq_(results[1].__class__, NoNodeError)
+
+    def test_bad_commit(self):
+        t = self.client.transaction()
+
+        @raises(ValueError)
+        def testit():
+            t.commit()
+
+        t.committed = True
+        testit()
+
+    def test_bad_context(self):
+        @raises(TypeError)
+        def testit():
+            with self.client.transaction() as t:
+                t.check(4232)
+        testit()
+
+    def test_context(self):
+        with self.client.transaction() as t:
+            t.create('/smith', '32')
+        eq_(self.client.get('/smith')[0], '32')
 
 
 class TestCallbacks(unittest.TestCase):

@@ -10,7 +10,10 @@ class KazooState(object):
     .. attribute:: SUSPENDED
 
         The connection has been lost but may be recovered. We should
-        operate in a "safe mode" until then.
+        operate in a "safe mode" until then. When the connection is
+        resumed, it may be discovered that the session expired. A
+        client should not assume that locks are valid during this
+        time.
 
     .. attribute:: CONNECTED
 
@@ -20,6 +23,8 @@ class KazooState(object):
 
         The connection has been confirmed dead. Any ephemeral nodes
         will need to be recreated upon re-establishing a connection.
+        If locks were acquired or recipes using ephemeral nodes are in
+        use, they can be considered lost as well.
 
     """
     SUSPENDED = "SUSPENDED"
@@ -32,10 +37,6 @@ class KeeperState(object):
 
     Represents the Zookeeper state. Watch functions will receive a
     :class:`KeeperState` attribute as their state argument.
-
-    .. attribute:: ASSOCIATING
-
-        The Zookeeper ASSOCIATING state
 
     .. attribute:: AUTH_FAILED
 
@@ -110,7 +111,7 @@ class WatchedEvent(namedtuple('WatchedEvent', ('type', 'state', 'path'))):
     """A change on ZooKeeper that a Watcher is able to respond to.
 
     The :class:`WatchedEvent` includes exactly what happened, the
-    current state of ZooKeeper, and the path of the znode that was
+    current state of ZooKeeper, and the path of the node that was
     involved in the event. An instance of :class:`WatchedEvent` will be
     passed to registered watch functions.
 
@@ -133,7 +134,7 @@ class WatchedEvent(namedtuple('WatchedEvent', ('type', 'state', 'path'))):
 class Callback(namedtuple('Callback', ('type', 'func', 'args'))):
     """A callback that is handed to a handler for dispatch
 
-    :param type: Type of the callback, can be 'session' or 'watch'
+    :param type: Type of the callback, currently is only 'watch'
     :param func: Callback function
     :param args: Argument list for the callback function
 

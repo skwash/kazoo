@@ -95,7 +95,7 @@ class KazooTestHarness(object):
         client.start()
         client.stop()
         self.client.get_async('/')
-        lost.wait()
+        lost.wait(45)
 
     def setup_zookeeper(self):
         """Create a ZK cluster and chrooted :class:`KazooClient`
@@ -129,9 +129,6 @@ class KazooTestHarness(object):
             client.delete('/', recursive=True)
             client.stop()
             del client
-
-    def add_errors(self, errors):
-        self.client.zookeeper = ZookeeperErrors(errors, self.client.handler)
 
 
 class KazooTestCase(unittest.TestCase, KazooTestHarness):

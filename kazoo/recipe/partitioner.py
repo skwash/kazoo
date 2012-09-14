@@ -46,8 +46,8 @@ class PartitionState(object):
     .. attribute:: FAILURE
 
         The set partition has failed. This occurs when the maximum
-        time to partition the set is exceeded or the Zookeeper session is
-        lost. The partitioner is unusable after this state and must
+        time to partition the set is exceeded or the Zookeeper session
+        is lost. The partitioner is unusable after this state and must
         be recreated.
 
     """
@@ -63,35 +63,14 @@ class SetPartitioner(object):
     This class will partition a set amongst members of a party such
     that each member will be given zero or more items of the set and
     each set item will be given to a single member. When new members
-    enter or leave the party, the set will be re-partitioned amongst the
-    members.
+    enter or leave the party, the set will be re-partitioned amongst
+    the members.
 
     When the :class:`SetPartitioner` enters the
     :attr:`~PartitionState.FAILURE` state, it is unrecoverable
     and a new :class:`SetPartitioner` should be created.
 
-
-    Simple Example:
-
-    .. code-block:: python
-
-        from kazoo.client import KazooClient
-        client = KazooClient()
-
-        qp = client.SetPartitioner(
-            path='/work_queues', set=('queue-1', 'queue-2', 'queue-3'))
-
-        def use_setlist(partitions):
-            # do something with a partition passed in
-
-        # Run the use_setlist function when partitions are acquired
-        # repeatedly
-        qp.run(func=use_setlist)
-
-    Sometimes, more control is needed over handling the state
-    transitions. Or the program may need to do other things during
-    specific states, in which case a more verbose example that allows
-    for finer grained control is needed:
+    Example:
 
     .. code-block:: python
 
@@ -154,16 +133,16 @@ class SetPartitioner(object):
                  identifier=None, time_boundary=30):
         """Create a :class:`~SetPartitioner` instance
 
-        :param client: A :class:`~kazoo.client.KazooClient` instance
-        :param path: The partition path to use
-        :param set: The set of items to partition
+        :param client: A :class:`~kazoo.client.KazooClient` instance.
+        :param path: The partition path to use.
+        :param set: The set of items to partition.
         :param partition_func: A function to use to decide how to
-                               partition the set
+                               partition the set.
         :param identifier: An identifier to use for this member of the
                            party when participating. Defaults to the
                            hostname + process id.
         :param time_boundary: How long the party members must be stable
-                              before allocation can complete
+                              before allocation can complete.
 
         """
         self.state = PartitionState.ALLOCATING
@@ -229,7 +208,8 @@ class SetPartitioner(object):
     def wait_for_acquire(self, timeout=30):
         """Wait for the set to be partitioned and acquired
 
-        :param timeout: How long to wait before returning
+        :param timeout: How long to wait before returning.
+        :type timeout: int
 
         """
         self._acquire_event.wait(timeout)
@@ -362,7 +342,7 @@ class SetPartitioner(object):
         """Register ourself to listen for session events, we shut down
         if we become lost"""
         if state == KazooState.LOST:
-            self._fail_out()
+            self._client.handler.spawn(self._fail_out)
             return True
 
     def _partitioner(self, identifier, members, partitions):

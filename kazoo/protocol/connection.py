@@ -1,7 +1,10 @@
 """Zookeeper Protocol Connection Handler"""
 import errno
 import logging
+import random
+import select
 import socket
+import time
 from contextlib import contextmanager
 
 from kazoo.exceptions import (
@@ -19,6 +22,7 @@ from kazoo.protocol.serialization import (
     GetChildren,
     Ping,
     ReplyHeader,
+    Transaction,
     Watch,
     int_struct
 )
@@ -46,13 +50,67 @@ AUTH_XID = -4
 def socket_error_handling():
     try:
         yield
-    except socket.error as e:
+    except (socket.error, select.error) as e:
         if isinstance(e.args, tuple):
             raise ConnectionDropped("socket connection error: %s",
                                     errno.errorcode[e[0]])
         else:  # pragma: nocover
             # This is only possible on Python 2.5 or earlier
             raise ConnectionDropped("socket connection error: %s", e)
+
+
+class RWPinger(object):
+    """A Read/Write Server Pinger Iterable
+
+    This object is initialized with the hosts iterator object and the
+    socket creation function. Anytime `next` is called on its iterator
+    it yields either False, or a host, port tuple if it found a r/w
+    capable Zookeeper node.
+
+    After the first run-through of hosts, an exponential back-off delay
+    is added before the next run. This delay is tracked internally and
+    the iterator will yield False if called too soon.
+
+    """
+    def __init__(self, hosts, socket_func):
+        self.hosts = hosts
+        self.socket = socket_func
+        self.last_attempt = None
+
+    def __iter__(self):
+        if not self.last_attempt:
+            self.last_attempt = time.time()
+        delay = 0.5
+        while True:
+            jitter = random.randint(0, 100) / 100.0
+            while time.time() < self.last_attempt + delay + jitter:
+                # Skip rw ping checks if its too soon
+                yield False
+            for host, port in self.hosts:
+                sock = self.socket()
+                log.debug("Pinging server for r/w: %s:%s", host, port)
+                self.last_attempt = time.time()
+                try:
+                    with socket_error_handling():
+                        sock.connect((host, port))
+                        sock.sendall("isro")
+                        result = sock.recv(8192)
+                        sock.close()
+                        if result == 'rw':
+                            yield (host, port)
+                        else:
+                            yield False
+                except ConnectionDropped:
+                    yield False
+
+                # Add some jitter between host pings
+                while time.time() < self.last_attempt + jitter:
+                    yield False
+            delay *= 2
+
+
+class RWServerAvailable(Exception):
+    """Thrown if a RW Server becomes available"""
 
 
 class ConnectionHandler(object):
@@ -71,6 +129,8 @@ class ConnectionHandler(object):
         self.log_debug = log_debug
         self._socket = None
         self._xid = None
+        self._rw_server = None
+        self._ro_mode = False
 
     def start(self):
         """Start the connection up"""
@@ -80,6 +140,11 @@ class ConnectionHandler(object):
         """Ensure the writer has stopped, wait to see if it does"""
         self.writer_stopped.wait(timeout)
         return self.writer_stopped.is_set()
+
+    def _server_pinger(self):
+        """Returns a server pinger iterable, that will ping the next
+        server in the list, and apply a back-off between attempts"""
+        return RWPinger(self.client.hosts, self.handler.socket)
 
     def _read_header(self, timeout):
         b = self._read(4, timeout)
@@ -102,13 +167,17 @@ class ConnectionHandler(object):
             return b"".join(msgparts)
 
     def _invoke(self, timeout, request, xid=None):
-        """A special writer used during connection establishment only"""
+        """A special writer used during connection establishment
+        only"""
         b = bytearray()
         if xid:
             b.extend(int_struct.pack(xid))
         if request.type:
             b.extend(int_struct.pack(request.type))
         b.extend(request.serialize())
+
+        if self.log_debug:
+            log.debug("Sending request: %s", request)
         self._write(int_struct.pack(len(b)) + b, timeout)
 
         zxid = None
@@ -137,7 +206,8 @@ class ConnectionHandler(object):
         return zxid
 
     def _submit(self, request, timeout, xid=None):
-        """Submit a request object with a timeout value and optional xid"""
+        """Submit a request object with a timeout value and optional
+        xid"""
         b = bytearray()
         b.extend(int_struct.pack(xid))
         if request.type:
@@ -166,26 +236,25 @@ class ConnectionHandler(object):
         if self.log_debug:
             log.debug('Received EVENT: %s', watch)
 
-        watchers = set()
+        watchers = []
         with client._state_lock:
             # Ignore watches if we've been stopped
             if client._stopped.is_set():
                 return
 
             if watch.type in (CREATED_EVENT, CHANGED_EVENT):
-                watchers |= self.client._data_watchers.pop(path, set())
+                watchers.extend(self.client._data_watchers.pop(path, []))
             elif watch.type == DELETED_EVENT:
-                watchers |= self.client._data_watchers.pop(path, set())
-                watchers |= self.client._child_watchers.pop(path, set())
+                watchers.extend(self.client._data_watchers.pop(path, []))
+                watchers.extend(self.client._child_watchers.pop(path, []))
             elif watch.type == CHILD_EVENT:
-                watchers |= self.client._child_watchers.pop(path, set())
+                watchers.extend(self.client._child_watchers.pop(path, []))
             else:
                 log.warn('Received unknown event %r', watch.type)
                 return
 
             # Strip the chroot if needed
-            if self.client.chroot:
-                path = path[len(self.client.chroot):]
+            path = self.client.unchroot(path)
 
         ev = WatchedEvent(EVENT_TYPE_MAP[watch.type], client._state, path)
 
@@ -203,7 +272,8 @@ class ConnectionHandler(object):
                                'received %r', xid, header.xid)
 
         # Determine if its an exists request and a no node error
-        exists_error = header.err == NoNodeError.code and request.type == 3
+        exists_error = header.err == NoNodeError.code and \
+                       request.type == Exists.type
 
         # Set the exception if its not an exists error
         if header.err and not exists_error:
@@ -228,6 +298,11 @@ class ConnectionHandler(object):
                     async_object.set_exception(exc)
                     return
                 log.debug('Received response: %r', response)
+
+                # We special case a Transaction as we have to unchroot things
+                if request.type == Transaction.type:
+                    response = Transaction.unchroot(client, response)
+
                 async_object.set(response)
 
             # Determine if watchers should be registered
@@ -235,9 +310,9 @@ class ConnectionHandler(object):
             with client._state_lock:
                 if not client._stopped.is_set() and watcher:
                     if isinstance(request, GetChildren):
-                        client._child_watchers[request.path].add(watcher)
+                        client._child_watchers[request.path].append(watcher)
                     else:
-                        client._data_watchers[request.path].add(watcher)
+                        client._data_watchers[request.path].append(watcher)
 
         if isinstance(request, Close):
             if self.log_debug:
@@ -296,8 +371,8 @@ class ConnectionHandler(object):
             log.debug('Reader stopped')
 
     def writer(self):
-        """Main writer function that writes to the ZK connection and handles
-        other state management"""
+        """Main writer function that writes to the ZK connection and
+        handles other state management"""
         if self.log_debug:
             log.debug('Writer started')
 
@@ -323,6 +398,13 @@ class ConnectionHandler(object):
         writer_done = False
         for host, port in client.hosts:
             self._socket = self.handler.socket()
+
+            # Were we given a r/w server? If so, use that instead
+            if self._rw_server:
+                if self.log_debug:
+                    log.debug("Found r/w server to use, %s:%s", host, port)
+                host, port = self._rw_server
+                self._rw_server = None
 
             if client._state != KeeperState.CONNECTING:
                 with client._state_lock:
@@ -369,6 +451,10 @@ class ConnectionHandler(object):
                 log.warning('Session has expired')
                 with client._state_lock:
                     client._session_callback(KeeperState.EXPIRED_SESSION)
+            except RWServerAvailable:
+                log.warning('Found a RW server, dropping connection')
+                with client._state_lock:
+                    client._session_callback(KeeperState.CONNECTING)
             except Exception as e:
                 log.exception(e)
                 raise
@@ -382,18 +468,14 @@ class ConnectionHandler(object):
     def _connect(self, host, port):
         client = self.client
         log.info('Connecting to %s:%s', host, port)
-        log.debug('    Using session_id: %r session_passwd: 0x%s',
-                  client._session_id,
-                  client._session_passwd.encode('hex'))
 
-        try:
+        if self.log_debug:
+            log.debug('    Using session_id: %r session_passwd: 0x%s',
+                      client._session_id,
+                      client._session_passwd.encode('hex'))
+
+        with socket_error_handling():
             self._socket.connect((host, port))
-        except socket.error, e:
-            if isinstance(e.args, tuple):
-                raise ConnectionDropped("socket connection error: %s",
-                                        errno.errorcode[e[0]])
-            else:
-                raise
 
         self._socket.setblocking(0)
 
@@ -415,14 +497,22 @@ class ConnectionHandler(object):
         connect_timeout = negotiated_session_timeout / len(client.hosts)
         read_timeout = negotiated_session_timeout * 2.0 / 3.0
         client._session_passwd = connect_result.passwd
-        log.debug('Session created, session_id: %r session_passwd: 0x%s\n'
-                  '    negotiated session timeout: %s\n'
-                  '    connect timeout: %s\n'
-                  '    read timeout: %s', client._session_id,
-                  client._session_passwd.encode('hex'), negotiated_session_timeout,
-                  connect_timeout, read_timeout)
 
-        client._session_callback(KeeperState.CONNECTED)
+        if self.log_debug:
+            log.debug('Session created, session_id: %r session_passwd: 0x%s\n'
+                      '    negotiated session timeout: %s\n'
+                      '    connect timeout: %s\n'
+                      '    read timeout: %s', client._session_id,
+                      client._session_passwd.encode('hex'),
+                      negotiated_session_timeout, connect_timeout,
+                      read_timeout)
+
+        if connect_result.read_only:
+            client._session_callback(KeeperState.CONNECTED_RO)
+            self._ro_mode = iter(self._server_pinger())
+        else:
+            client._session_callback(KeeperState.CONNECTED)
+            self._ro_mode = None
 
         for scheme, auth in client.auth_data:
             ap = Auth(0, scheme, auth)
@@ -435,8 +525,8 @@ class ConnectionHandler(object):
         client = self.client
         ret = None
         try:
-            request, async_object = client._queue.peek(True,
-                read_timeout / 2000.0)
+            timeout = read_timeout / 2000.0 - random.randint(0, 40) / 100.0
+            request, async_object = client._queue.peek(True, timeout)
 
             # Special case for auth packets
             if request.type == Auth.type:
@@ -464,6 +554,13 @@ class ConnectionHandler(object):
             if self.log_debug:
                 log.debug('Queue timeout.  Sending PING')
             self._submit(Ping, connect_timeout, PING_XID)
+
+            # Determine if we need to check for a r/w server
+            if self._ro_mode:
+                result = self._ro_mode.next()
+                if result:
+                    self._rw_server = result
+                    raise RWServerAvailable()
         except Exception as e:
             log.exception(e)
             ret = True

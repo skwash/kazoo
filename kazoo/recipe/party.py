@@ -2,6 +2,7 @@
 
 A Zookeeper pool of party members. The :class:`Party` object can be
 used for determining members of a party.
+
 """
 import uuid
 
@@ -10,11 +11,10 @@ from kazoo.exceptions import NodeExistsError, NoNodeError
 
 class BaseParty(object):
     """Base implementation of a party."""
-
     def __init__(self, client, path, identifier=None):
         """
-        :param client: A :class:`~kazoo.client.KazooClient` instance
-        :param path: The party path to use
+        :param client: A :class:`~kazoo.client.KazooClient` instance.
+        :param path: The party path to use.
         :param identifier: An identifier to use for this member of the
                            party when participating.
 

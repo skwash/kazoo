@@ -13,11 +13,12 @@ class ZookeeperError(KazooException):
 
 
 class CancelledError(KazooException):
-    """Raised when a process is cancelled by another thread"""
+    """Raised when a process is canceled by another thread"""
 
 
 class ConfigurationError(KazooException):
-    """Raised if the configuration arguments to an object are invalid"""
+    """Raised if the configuration arguments to an object are
+    invalid"""
 
 
 class ZookeeperStoppedError(KazooException):
@@ -145,6 +146,17 @@ class InvalidACLError(ZookeeperError):
 @_zookeeper_exception(-115)
 class AuthFailedError(ZookeeperError):
     pass
+
+
+@_zookeeper_exception(-118)
+class SessionMovedError(ZookeeperError):
+    pass
+
+
+@_zookeeper_exception(-119)
+class NotReadOnlyCallError(ZookeeperError):
+    """An API call that is not read-only was used while connected to
+    a read-only server"""
 
 
 class ConnectionClosedError(SessionExpiredError):

@@ -1,6 +1,7 @@
 import time
 import unittest
 
+import gevent
 from gevent.event import Event
 from nose.tools import eq_
 from nose.tools import raises
@@ -18,42 +19,6 @@ class TestGeventHandler(unittest.TestCase):
     def _getAsync(self, *args):
         from kazoo.handlers.gevent import AsyncResult
         return AsyncResult
-
-    def test_completion_vs_session(self):
-        h = self._makeOne()
-        h.start()
-
-        lst = []
-        av = Event()
-        bv = Event()
-        cv = Event()
-        dv = Event()
-
-        def addToList():
-            av.set()
-            bv.wait()
-            lst.append(True)
-            dv.set()
-
-        def anotherAdd():
-            lst.append(True)
-            cv.set()
-
-        call1 = Callback('session', addToList, ())
-        call2 = Callback('completion', anotherAdd, ())
-
-        h.dispatch_callback(call1)
-        av.wait()
-        # Now we know the first is waiting, make sure
-        # the second executes while the first has blocked
-        # its thread
-        h.dispatch_callback(call2)
-        cv.wait()
-
-        eq_(lst, [True])
-        bv.set()
-        dv.wait()
-        eq_(lst, [True, True])
 
     def test_proper_threading(self):
         h = self._makeOne()
@@ -113,6 +78,29 @@ class TestGeventHandler(unittest.TestCase):
         def testit():
             queue.peek(block=False)
         testit()
+
+    def test_peekable_queue_switching(self):
+        h = self._makeOne()
+        queue = h.peekable_queue()
+
+        def getter():
+            peeked = queue.peek(True, timeout=5)
+            got = queue.get()
+            eq_(peeked, got)
+            return got
+
+        # try to make sure getter is running before putting
+        getter_thread = gevent.spawn(getter)
+        gevent.spawn_later(0, queue.put, 'fred')
+
+        eq_(getter_thread.get(), 'fred')
+
+        # repeat the process to make sure the queue signalling mechanism
+        # is reset correctly
+        getter_thread = gevent.spawn(getter)
+        gevent.spawn_later(0, queue.put, 'fred')
+
+        eq_(getter_thread.get(), 'fred')
 
 
 class TestGeventClient(KazooTestCase):
